@@ -1,7 +1,11 @@
-from pysnmp.hlapi import *
+#!/usr/bin/env python
+
+
+
 import argparse
 import sys
 import math
+import easysnmp
 import re
 
 AUTHOR = "Frederic Werner"
@@ -27,27 +31,38 @@ critical = args.c
 
 state = 'OK'
 
-def snmpget(oid):
-    errorIndication, errorStatus, errorIndex, varBinds = next(
-        getCmd(SnmpEngine(),
-               UsmUserData(user_name, auth_key, priv_key, authProtocol=usmHMACMD5AuthProtocol, privProtocol=usmAesCfb128Protocol),
-               UdpTransportTarget((hostname, 161)),
-               ContextData(),
-               ObjectType(ObjectIdentity(oid)
-                #.addAsn1MibSource('file:///usr/share/snmp', 'http://mibs.snmplabs.com/asn1/@mib@')
-                ))
-    )
+try:
+    session = easysnmp.Session(
+        hostname=hostname,
+        version=3,
+        security_level="auth_with_privacy",
+        security_username=user_name,
+        auth_password=auth_key,
+        auth_protocol="MD5",
+        privacy_password=priv_key,
+        privacy_protocol="AES128")
 
-    if errorIndication:
-        print(errorIndication)
-    elif errorStatus:
-        print('%s at %s' % (errorStatus.prettyPrint(),
-                            errorIndex and varBinds[int(errorIndex) - 1][0] or '?'))
-    else:
-        for varBind in varBinds:
-            answer = (' = '.join([x.prettyPrint() for x in varBind]))
-            #print(' = '.join([x.prettyPrint() for x in varBind]))
-            return x.prettyPrint()
+except easysnmp.EasySNMPError as e:
+    print(e)
+    exit(-1)
+
+
+def snmpget(oid):
+    try:
+        res = session.get(oid)
+        return res.value
+    except easysnmp.EasySNMPError as e:
+        print(e)
+
+# Walk the given OID and return all child OIDs as a list of tuples of OID and value
+def snmpwalk(oid):
+    res = []
+    try:
+        res = session.walk(oid)
+    except easysnmp.EasySNMPError as e:
+        print(e)
+    return res
+
 
 def exitCode():
     if state == 'OK':
@@ -69,7 +84,7 @@ if mode == 'load':
     if critical and critical < int(math.ceil(float(load1))):
         state = 'CRITICAL'
 
-    print state + ' - load average: %s, %s, %s' % (load1, load5, load15), '| load1=%sc' % load1, 'load5=%sc' % load5, 'load15=%sc' % load15
+    print (state + ' - load average: %s, %s, %s' % (load1, load5, load15), '| load1=%sc' % load1, 'load5=%sc' % load5, 'load15=%sc' % load15)
     exitCode()
 
 if mode == 'memory':
@@ -82,20 +97,16 @@ if mode == 'memory':
     if critical and critical > int(memory_percent):
         state = 'CRITICAL'
 
-    print state + ' - {:0.1f}% '.format(memory_percent) + 'free ({0:0.1f} MB out of {1:0.1f} MB)'.format((memory_unused / 1024), (memory_total / 1024)), '|memory_total=%dc' % memory_total, 'memory_unused=%dc' % memory_unused , 'memory_percent=%d' % memory_percent + '%'
+    print (state + ' - {:0.1f}% '.format(memory_percent) + 'free ({0:0.1f} MB out of {1:0.1f} MB)'.format((memory_unused / 1024), (memory_total / 1024)), '|memory_total=%dc' % memory_total, 'memory_unused=%dc' % memory_unused , 'memory_percent=%d' % memory_percent + '%')
     exitCode()
 
 if mode == 'disk':
     maxDisk = 0
     output = ''
     perfdata = '|'
-    for i in range(0, 64, 1):
-        disk = snmpget('1.3.6.1.4.1.6574.2.1.1.2.' + str(i))
-        if disk.startswith("No Such Instance"):
-            break
-        maxDisk = maxDisk + 1
-    for i in range(0, maxDisk, 1):
-        disk_name = snmpget('1.3.6.1.4.1.6574.2.1.1.2.' + str(i))
+    for item in snmpwalk('1.3.6.1.4.1.6574.2.1.1.2'):
+        i = item.oid.split('.')[-1]
+        disk_name = item.value
         disk_status_nr = snmpget('1.3.6.1.4.1.6574.2.1.1.5.' + str(i))
         disk_temp = snmpget('1.3.6.1.4.1.6574.2.1.1.6.' + str(i))
         status_translation = {
@@ -116,14 +127,15 @@ if mode == 'disk':
 
         output += ' - ' + disk_name + ': Status: ' + disk_status + ', Temperature: ' + disk_temp + ' C'
         perfdata += 'temperature' + disk_name + '=' + disk_temp + 'c '
-    print '%s%s %s' % (state, output, perfdata)
+    print ('%s%s %s' % (state, output, perfdata))
     exitCode()
 
 if mode == 'storage':
     output = ''
     perfdata = '|'
-    for i in range(1,256,1):
-        storage_name = snmpget('1.3.6.1.2.1.25.2.3.1.3.' + str(i))
+    for item in snmpwalk('1.3.6.1.2.1.25.2.3.1.3'):
+        i = item.oid.split('.')[-1]
+        storage_name = item.value
         if re.match("/volume(?!.+/@docker.*)", storage_name) :
             allocation_units = snmpget('1.3.6.1.2.1.25.2.3.1.4.' + str(i))
             size = snmpget('1.3.6.1.2.1.25.2.3.1.5.' + str(i))
@@ -142,7 +154,7 @@ if mode == 'storage':
 
             output += ' -  free space: ' + storage_name + ' ' + str(storage_free) + ' GB (' + str(storage_used) + ' GB von ' + str(storage_size) + ' GB belegt, ' + str(storage_used_percent) + '%)'
             perfdata += storage_name + '=' + str(storage_used) + 'c '
-    print '%s%s %s' % (state, output, perfdata)
+    print ('%s%s %s' % (state, output, perfdata))
     exitCode()
 
 if mode == 'update':
@@ -162,7 +174,7 @@ if mode == 'update':
         state = 'CRITICAL'
 
     update_status = status_translation.get(update_status_nr)
-    print state + ' - DSM Version: %s, DSM Update: %s' % (update_dsm_verison, update_status), '| DSMupdate=%sc' % update_status_nr
+    print (state + ' - DSM Version: %s, DSM Update: %s' % (update_dsm_verison, update_status), '| DSMupdate=%sc' % update_status_nr)
     exitCode()
 
 if mode == 'status':
@@ -190,5 +202,5 @@ if mode == 'status':
     if critical and critical < int(status_temperature):
         state = 'CRITICAL'
 
-    print state + ' - Model: %s, S/N: %s, System Temperature: %s C, System Status: %s, System Fan: %s, CPU Fan: %s, Powersupply : %s' % (status_model, status_serial, status_temperature, status_system, status_system_fan, status_cpu_fan, status_power) + ' | system_temp=%sc' % status_temperature
+    print (state + ' - Model: %s, S/N: %s, System Temperature: %s C, System Status: %s, System Fan: %s, CPU Fan: %s, Powersupply : %s' % (status_model, status_serial, status_temperature, status_system, status_system_fan, status_cpu_fan, status_power) + ' | system_temp=%sc' % status_temperature)
     exitCode()
